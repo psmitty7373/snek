@@ -10,34 +10,45 @@ import random
 CLIENT_MSG_LEN = 2
 SNEK_SERVER = None
 
+# Directions
 NORTH = 1
 EAST = 2
 SOUTH = 3
 WEST = 4
 
-FOOD = 33
+# Square types
+FOOD  = 33
+BLANK = 0
 
-MAX_FOOD = 4
+STARTING_MIN_FOOD = 4
+MAX_SNEKS = 16
+
+# Causes of death
+DISCONNECT = 0
+OTHER      = 1
 
 class Snek():
-    def __init__(self, snek_id):
+    def __init__(self, snek_id, board):
         self.snek_id = snek_id
+        self.head_value = snek_id*2+1
+        self.body_value = snek_id*2+2
         direction = random.randint(1, 4)
         self.direction = direction
-        # [block type (head, body), x, y, direction]
-        x = random.randint(5, 75)
-        y = random.randint(5, 35)
-        self.blocks = [(snek_id*2+1, x, y, self.direction)]
-        if NORTH == direction:
-            y += 1 
-        elif EAST == direction:
-            x -= 1 
-        elif SOUTH == direction:
-            y -= 1 
-        elif WEST == direction:
-            x += 1
 
-        self.blocks.append((0, x, y, direction))
+        # Cache the direction from the begining of the move to ignore turning back on self
+        self.last_direction = direction
+
+        # Don't spawn on top of things
+        x = random.randint(15, 65)
+        y = random.randint(15, 25)
+        while 0 != board[y][x]:
+            x = random.randint(15, 65)
+            y = random.randint(15, 25)
+
+        # [block type (head, body), x, y, direction]
+        self.blocks = [(self.head_value, x, y, direction)]
+
+        self._append_null_tail()
         self.score = 0
         self.hydration = 50
         self.salt = 50
@@ -65,9 +76,10 @@ class Snek():
     def slither(self):
         old_blocks = self.blocks
 
-        # Convert the old head to be a body block. If the snek is just a head, it will get truncated later.
+        if not old_blocks:
+            return []
+
         old_head = old_blocks[0]
-        self.blocks[0] = (self.snek_id*2, old_head[1], old_head[2], old_head[3])
         
         # New head
         new_x = old_head[1]
@@ -82,43 +94,68 @@ class Snek():
         elif WEST == self.direction:
             new_x -= 1
 
-        self.blocks = [(self.snek_id*2+1, new_x, new_y, self.direction)] + self.blocks
+        new_head = (self.head_value, new_x, new_y, self.direction)
 
-        # Store the old tail as a blank block to:
-        #   1) enable restoring it if the snek ate this move,
-        #   2) transmit the update to the snek server.
-        old_tail = self.blocks[-2]
-        self.blocks = self.blocks[:-2] + [(0, old_tail[1], old_tail[2], old_tail[3])]
-        print("blocks: "  + str(self.blocks))
+        tail = self.blocks[-2]
+        new_null_tail = (BLANK, tail[1], tail[2], tail[3])
+
+        if 2 == len(old_blocks):
+            self.blocks = [new_head] + [new_null_tail]
+        else:
+            new_neck = (self.body_value, old_head[1], old_head[2], old_head[3])
+            self.blocks = [new_head] + [new_neck] + self.blocks[1:-2] + [new_null_tail]
+
+        self.last_direction = self.direction
+
         # Return the changes
-        return [block for block in self.blocks if block not in set(old_blocks)] # Say that five times fast.
+        return [block for block in self.blocks if block not in set(old_blocks) and BLANK != block[0]] # Say that five times fast.
 
     def change_direction(self, direction):
-        self.direction = direction
+        # Ignore turning back on self
+        if 0 != (direction + self.last_direction) % 2:
+            self.direction = direction
 
     def die(self):
-        self.blocks = list()
+        self.blocks = None
 
     def eat(self):
         self.score += 1
-        tail = self.blocks[-1]
-        print("blocks....: " + str(self.blocks))
-        self.blocks = self.blocks[:-1]
-        new_x = tail[1]
-        new_y = tail[2]
-        direction = tail[3]
-        self.blocks.append((self.snek_id*2+2, new_x, new_y, direction))
-        if NORTH == direction:
-            new_y += 1 
-        elif EAST == direction:
-            new_x -= 1 
-        elif SOUTH == direction:
-            new_y -= 1 
-        elif WEST == direction:
-            new_x += 1
+        terminal_block = self.blocks[-1]
+        if BLANK != terminal_block[0]:
+            self._append_null_tail()
+            terminal_block = self.blocks[-1]
 
-        self.blocks.append((0, new_x, new_y, direction))
-        print("blocks after eat: " + str(self.blocks))
+        x = terminal_block[1]
+        y = terminal_block[2]
+        direction = terminal_block[3]
+
+        self.blocks = self.blocks[:-1]
+        self.blocks.append((self.body_value, x, y, direction))
+        self._append_null_tail()
+
+    # The null block at the end of a snek.blocks serves as a placeholder for growth
+    def _append_null_tail(self):
+        terminal_block = self.blocks[-1]
+        # Null block already exists
+        if BLANK == terminal_block[0]:
+            return
+
+        # Position null block based on direction of terminal block
+        
+        direction = terminal_block[3]
+        x = terminal_block[1]
+        y = terminal_block[2]
+        if NORTH == direction:
+            y += 1
+        elif EAST == direction:
+            x -= 1 
+        elif SOUTH == direction:
+            y -= 1 
+        elif WEST == direction:
+            x += 1
+
+        self.blocks.append((BLANK, x, y, direction))
+ 
 
 class SnekProtocol(asyncio.Protocol):
     def __init__(self, connections, sneks, available_snek_ids, food_count, board):
@@ -134,38 +171,36 @@ class SnekProtocol(asyncio.Protocol):
         self.peername = transport.get_extra_info('sockname')
         self.transport = transport
         
-        # Assign a snek id, iff the server isn't full of sneks.
-        if 0 != len(self.available_snek_ids):
-            assigned_snek_id = self.available_snek_ids[0]
-            self.available_snek_ids = self.available_snek_ids[1:]
-            new_snek = Snek(assigned_snek_id)
-            self.sneks[assigned_snek_id] = new_snek
-            self.snek = new_snek
-            self.transport.write(bytes([assigned_snek_id])*2)
-            self.connections += [transport]
-
-        # Close failed requests.
-        else:
-            self.transport.write(b'\xff\xff')
-            self.transport.close()
-
     def connection_lost(self, exc):
         self.connections.remove(self.transport)
         if exc:
             print(exc)
         err = "{}:{} disconnected".format(*self.peername)
-        if self.snek:
-            self.snek.die()
+        if self.snek and self.snek.blocks:
+            SNEK_SERVER.kill_snek(self.snek, DISCONNECT)
         print(err)
 
     def data_received(self, data):
         if data and CLIENT_MSG_LEN == len(data):
-            print("got: " + str(data))
             snek_id = int(data[0])
             cmd = int(data[1])
-            print("snek id = %i"%snek_id)
-            print("cmd = %i"%cmd)
-            if self.snek:
+            if 0 == snek_id and 0 == cmd and not self.snek:
+                # Assign a snek id, iff the server isn't full of sneks.
+                if 0 != len(self.available_snek_ids):
+                    assigned_snek_id = self.available_snek_ids.pop()
+                    print("assigning snek id %i"%assigned_snek_id)
+                    new_snek = Snek(assigned_snek_id, self.board)
+                    self.sneks[assigned_snek_id] = new_snek
+                    self.snek = new_snek
+                    self.transport.write(bytes([assigned_snek_id])*2)
+                    self.connections += [self.transport]
+
+                # Close failed requests.
+                else:
+                    self.transport.write(b'\xff\xff')
+                    self.transport.close()
+
+            elif self.snek:
                 if snek_id != self.snek.snek_id or cmd < 1 or cmd > 4:
                     print("ignoring bad command")
                     return
@@ -202,23 +237,23 @@ class SnekServer():
                 # Border
                 if new_x < 0 or new_x >= 80 or new_y < 0 or new_y >= 40:
                     sneks_to_kill.append(self.sneks[snek_id])
-
-                # Detect other types of conflicts
-                applicable_diffs = [d for d in diffs if d != diff and d[1] == new_x and d[2] == new_y]
-                if 0 == len(applicable_diffs):
-                    applicable_diffs.append((self.board[new_y][new_x], new_x, new_y, 0))
-
-                # The only conflict is a blank square. Do nothing exciting.
-                if 1 == len(applicable_diffs) and 0 == applicable_diffs[0][0]:
                     continue
 
-                print(applicable_diffs)
-                for applicable_diff in applicable_diffs:
-                    square_type = applicable_diff[0]
+                # Detect other types of conflicts
+                conflicts = [d for d in diffs if d != diff and d[1] == new_x and d[2] == new_y]
+                if 0 == len(conflicts):
+                    conflicts.append((self.board[new_y][new_x], new_x, new_y, 0))
+
+                # The only conflict is a blank square. Do nothing exciting.
+                if 1 == len(conflicts) and BLANK == conflicts[0][0]:
+                    continue
+
+                for conflict in conflicts:
+                    square_type = conflict[0]
                     # Head hit body square or head square
-                    if 16 >= square_type and 0 < square_type:
-                        print("bar")
+                    if MAX_SNEKS*2 >= square_type and 0 < square_type:
                         sneks_to_kill.append(self.sneks[snek_id])
+                        continue
                     # Head hit food square
                     elif 32 < square_type:
                         sneks_to_feed.append(self.sneks[snek_id])
@@ -226,7 +261,7 @@ class SnekServer():
         sneks_to_feed = [s for s in sneks_to_feed if s not in set(sneks_to_kill)] # snek
 
         for snek in sneks_to_kill:
-            self._kill_snek(snek)
+            self.kill_snek(snek, OTHER)
 
         for snek in sneks_to_feed:
             self._feed_snek(snek)
@@ -236,12 +271,10 @@ class SnekServer():
 
     def _commit_sneks(self):
         for snek in self.sneks.values():
-            print("commit these blocks: " + str(snek.blocks))
             for block in snek.blocks:
                 x = block[1]
                 y = block[2]
                 self.board[y][x] = block[0]
-                print("%i, %i is now %i"%(x,y,self.board[y][x]))
 
     def _broadcast_update(self):
         msg = bytes()
@@ -259,17 +292,20 @@ class SnekServer():
         for connection in self.connections:
             connection.write(msg)
 
-    def _kill_snek(self, snek):
-        print("killin snek %i"%snek.snek_id)
-        return
+    def kill_snek(self, snek, cause_of_death):
+        snek_id = snek.snek_id
         for block in snek.blocks:
-            if 0 != block[0]:
+            if (BLANK != block[0] and DISCONNECT == cause_of_death) or (snek.head_value != block[0] and DISCONNECT != cause_of_death):
                 x = block[1]
                 y = block[2]
-                self.board[x][y] = FOOD
+                if random.randint(0, 1):
+                    self.board[y][x] = FOOD
+                    self.food_count += 1
+                else:
+                    self.board[y][x] = BLANK
+        self.available_snek_ids.insert(0, snek.snek_id)
         snek.die()
-        self.available_snek_ids.append(snek.snek_id)
-        del self.sneks[snek.snek_id]
+        self.sneks.pop(snek.snek_id)
 
     def _feed_snek(self, snek):
         snek.eat()
@@ -278,10 +314,11 @@ class SnekServer():
         self.food_count -= 1
 
     def _spawn_food(self):
-        while MAX_FOOD > self.food_count:
+        MIN_FOOD = max(len(self.sneks.keys()) * 1.5, STARTING_MIN_FOOD)
+        while MIN_FOOD > self.food_count:
             x = random.randint(0, 79)
             y = random.randint(0, 39)
-            if 0 == self.board[y][x]:
+            if BLANK == self.board[y][x]:
                 self.board[y][x] = FOOD
                 self.food_count += 1
 
@@ -303,7 +340,7 @@ if __name__ == "__main__":
 
     connections = list()
     sneks = dict()
-    available_snek_ids = [i for i in range(0, 16)]
+    available_snek_ids = [i for i in range(MAX_SNEKS-1, -1, -1)]
     food_count = 0
     board = [[0 for i in range(80)] for j in range(40)]
 
