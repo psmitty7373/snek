@@ -6,9 +6,22 @@ import argparse
 from datetime import datetime
 import struct 
 import random
+from copy import deepcopy
 
 CLIENT_MSG_LEN = 2
 SNEK_SERVER = None
+
+# Message types
+MSG_TYPE_JOIN   = 0
+MSG_TYPE_BOARD  = 1
+MSG_TYPE_UPDATE = 2
+MSG_TYPE_INFO   = 3
+MSG_TYPE_TXT    = 4
+
+JOIN_REJECT = 255
+
+INFO_TYPE_JOIN = 0
+INFO_TYPE_KILL = 1
 
 # Directions
 NORTH = 1
@@ -192,12 +205,16 @@ class SnekProtocol(asyncio.Protocol):
                     new_snek = Snek(assigned_snek_id, self.board)
                     self.sneks[assigned_snek_id] = new_snek
                     self.snek = new_snek
-                    self.transport.write(bytes([assigned_snek_id])*2)
+                    msg = self._msg_join_accept(assigned_snek_id)
+                    self.transport.write(msg)
+                    msg = self._msg_board()
+                    self.transport.write(msg)
                     self.connections += [self.transport]
 
                 # Close failed requests.
                 else:
-                    self.transport.write(b'\xff\xff')
+                    msg = self._msg_join_reject()
+                    self.transport.write(msg)
                     self.transport.close()
 
             elif self.snek:
@@ -208,6 +225,31 @@ class SnekProtocol(asyncio.Protocol):
                 # Handle directional commands.
                 self.snek.change_direction(cmd)
 
+    def _msg_join_accept(self, snek_id):
+        return bytes([MSG_TYPE_JOIN, snek_id])
+
+    def _msg_join_reject(self):
+        return bytes([MSG_TYPE_JOIN, JOIN_REJECT])
+
+    # Snek data goes in board messages and update messages
+    def _msg_field_snek_data(self):
+        msg = bytes([len(self.sneks.keys())])
+        for snek in self.sneks.values():
+            msg += bytes([snek.snek_id])
+            msg += snek.score.to_bytes(2, byteorder='big')
+            msg += b'\x00\x00'
+        return msg
+
+    def _msg_board(self):
+        msg = self._msg_field_snek_data()
+        for y in range(len(self.board)):
+            for x in range(len(self.board[0])):
+                msg += bytes([self.board[y][x]])
+
+        msg = bytes([MSG_TYPE_BOARD]) + len(msg).to_bytes(4, byteorder='big') + msg 
+        return msg
+
+
 # The SnekServer has the connections, the sneks, and runs the game.
 class SnekServer():
     def __init__(self, connections, sneks, available_snek_ids, food_count, board):
@@ -216,6 +258,7 @@ class SnekServer():
         self.available_snek_ids = available_snek_ids
         self.food_count = food_count
         self.board = board
+        self.last_board = board
 
     def _slither_the_sneks(self):
         diffs = list()
@@ -276,19 +319,7 @@ class SnekServer():
                 y = block[2]
                 self.board[y][x] = block[0]
 
-    def _broadcast_update(self):
-        msg = bytes()
-        msg += bytes([len(self.sneks.keys())])
-        for snek in self.sneks.values():
-            msg += bytes([snek.snek_id])
-            msg += snek.score.to_bytes(2, byteorder='big')
-            msg += b'\x00\x00'
-        for y in range(len(self.board)):
-            for x in range(len(self.board[0])):
-                msg += bytes([x, y, self.board[y][x]])
-
-        msg = len(msg).to_bytes(4, byteorder='big') + msg 
-            
+    def _broadcast(self, msg):
         for connection in self.connections:
             connection.write(msg)
 
@@ -303,6 +334,8 @@ class SnekServer():
                     self.food_count += 1
                 else:
                     self.board[y][x] = BLANK
+        msg = self._msg_info(INFO_TYPE_KILL, snek.snek_id)
+        self._broadcast(msg)
         self.available_snek_ids.insert(0, snek.snek_id)
         snek.die()
         self.sneks.pop(snek.snek_id)
@@ -323,8 +356,38 @@ class SnekServer():
                 self.food_count += 1
 
     def _update(self):
+        self._cache_board()
         self._slither_the_sneks()
-        self._broadcast_update()
+        msg = self._msg_update()
+        self._broadcast(msg)
+
+    # Snek data goes in board messages and update messages
+    def _msg_field_snek_data(self):
+        msg = bytes([len(self.sneks.keys())])
+        for snek in self.sneks.values():
+            msg += bytes([snek.snek_id])
+            msg += snek.score.to_bytes(2, byteorder='big')
+            msg += b'\x00\x00'
+        return msg
+
+    def _msg_update(self):
+        msg = self._msg_field_snek_data()
+        for y in range(len(self.board)):
+            for x in range(len(self.board[0])):
+                new_square = self.board[y][x]
+                old_square = self.last_board[y][x]
+                if old_square != new_square:
+                    msg += bytes([x, y, new_square])
+
+        msg = bytes([MSG_TYPE_UPDATE]) + len(msg).to_bytes(4, byteorder='big') + msg 
+        return msg
+        
+    def _cache_board(self):
+        self.last_board = deepcopy(self.board)
+
+    def _msg_info(self, info_type, snek_id):
+       msg = bytes([MSG_TYPE_INFO, info_type, snek_id])
+       return msg
 
 @asyncio.coroutine
 def update_periodically():
