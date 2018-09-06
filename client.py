@@ -4,6 +4,15 @@ import curses, locale, select, signal, socket, struct, sys, time
 
 locale.setlocale(locale.LC_ALL, '')
 
+MSG_TYPE_JOIN = 0
+MSG_TYPE_BOARD = 1
+MSG_TYPE_UPDATE = 2
+MSG_TYPE_INFO = 3
+MSG_TYPE_TXT = 4
+
+INFO_TYPE_JOIN = 0
+INFO_TYPE_KILL = 1
+
 NAME = 0
 SYMBOL = 1
 COLOR = 2
@@ -11,7 +20,7 @@ COLOR = 2
 the_foods = {
         33: ('SALT', '.', 231),
         34: ('CRACKER', '#', 227),
-        35: ('TOBASCO', 'i', 124),
+        35: ('TABASCO', 'i', 124),
         36: ('SNACK_BREAD', 'B', 180),
         37: ('OMLET', '_', 185),
         38: ('WATER', 'U', 123)
@@ -67,7 +76,7 @@ Food:
 . = MRE Salt.  Consume lightly, will reduce your
 hydration level.
 # = MRE Cracker.  Try to eat it all without drinking.
-i = MRE Tobasco.  Will make you immune to poison for
+i = MRE Tabasco.  Will make you immune to poison for
 a short time.
 B = MRE Snack Bread.  Yum.
 _ = MRE Omlet.  Only the finest for your snek.
@@ -244,22 +253,37 @@ class game:
                     self.my_renderer.messagebar.addstr(y,0,'|' + ''.ljust(123) + '|')
         self.my_renderer.messagebar.refresh()
 
-    def process_msg(self, msg):
-        msg_type = msg[0]
-        num_sneks = msg[0]
-        sneks = msg[1:1 + num_sneks * 5]
-        board_changes = msg[1 + num_sneks * 5:]
-        # process sneks
-        for snek in [sneks[i:i+5] for i in range(0, len(sneks), 5)]:
-            snek_id = snek[0]
-            self.sneks[snek_id].score = struct.unpack('!h', snek[1:3])[0]
-            self.sneks[snek_id].health = struct.unpack('!h', snek[3:5])[0]
+    def process_msg(self, msg_type, msg):
+        if msg_type == MSG_TYPE_JOIN:
             pass
-        # process board updates
-        for update in [board_changes[i:i+3] for i in range(0, len(board_changes), 3)]:
-#            sys.stderr.write('Board_update: ' + str(update[0]) + ' ' + str(update[1]) + ' ' + str(update[2]) + '\r\n')
-            self.board[update[1]][update[0]] = int(update[2])
+        elif msg_type == MSG_TYPE_BOARD or msg_type == MSG_TYPE_UPDATE:
+            num_sneks = msg[0]
+            sys.stderr.write('Num_sneks: ' + repr(num_sneks) + '\n')
+            sneks = msg[1:1 + num_sneks * 5]
+            board_changes = msg[1 + num_sneks * 5:]
+            # process sneks
+            for snek in [sneks[i:i+5] for i in range(0, len(sneks), 5)]:
+                snek_id = snek[0]
+                self.sneks[snek_id].score = struct.unpack('!h', snek[1:3])[0]
+                self.sneks[snek_id].health = struct.unpack('!h', snek[3:5])[0]
+            if msg_type == MSG_TYPE_BOARD:
+                # process board whole
+                cnt = 0
+                for v in board_changes:
+                    self.board[cnt // 80][cnt % 80] = int(v)
+                    cnt += 1
+            # process board updates
+            elif msg_type == MSG_TYPE_UPDATE: 
+                for update in [board_changes[i:i+3] for i in range(0, len(board_changes), 3)]:
+                    self.board[update[1]][update[0]] = int(update[2])
             self.dirty = True
+
+        elif msg_type == MSG_TYPE_UPDATE:
+            pass
+        elif msg_type == MSG_TYPE_INFO:
+            pass
+        elif msg_type == MSG_TYPE_TXT:
+            pass
 
     def turn_up(self):
         self.sock.send(bytes([self.my_snek.snek_id]) + b'\x01')
@@ -281,9 +305,8 @@ def sig_handler(s, f):
 def main():
     signal.signal(signal.SIGINT, sig_handler)
     connected = False
-    joined = False
     join_sent = False
-    time.sleep(2)
+    time.sleep(0)
 
     # init the game
     my_game = game()
@@ -348,24 +371,28 @@ def main():
             r, w, e = select.select([my_game.sock], [], [], 0)
             if my_game.sock in r:
                 # joined game, process messages normally
-                if joined:
-                    msg_len = struct.unpack('!i', my_game.sock.recv(4))[0]
-                    msg = recv_n(my_game.sock, msg_len)
-                    my_game.process_msg(msg)
-
-                # join sent, but no response yet, wait for our snek id
-                elif join_sent:
-                    # got a response, get our id
-                    rx = my_game.sock.recv(2)
-                    my_game.my_snek.snek_id = rx[0]
+                msg_type = my_game.sock.recv(1)[0]
+                sys.stderr.write('Got msg type: ' + repr(msg_type) + ' ' + repr(type(msg_type)) + '\n')
+                if msg_type == MSG_TYPE_JOIN:
+                    sys.stderr.write('Got Join.\n')
+                    my_game.my_snek.snek_id = my_game.sock.recv(1)[0]
                     my_game.messages.insert(0, 'My snek is: ' + str(my_game.my_snek.snek_id))
-                    joined = True
 
                     # server told us it was full of sneks
                     if my_game.my_snek.snek_id == 255:
                         my_game.my_renderer.shutdown()
                         print('Server full of sneks.')
                         sys.exit(1)
+
+                elif msg_type == MSG_TYPE_BOARD or msg_type == MSG_TYPE_UPDATE or msg_type == MSG_TYPE_TXT:
+                    msg_len = struct.unpack('!i', my_game.sock.recv(4))[0]
+                    msg = recv_n(my_game.sock, msg_len)
+                    my_game.process_msg(msg_type, msg)
+
+                elif msg_type == MSG_TYPE_INFO:
+                    msg = recv_n(my_game.sock, 2)
+                    sys.stderr.write(repr(msg) + '\n')
+                    my_game.process_msg(msg_type, msg)
 
             # draw the game
             my_game.draw_game()
