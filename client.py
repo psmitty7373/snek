@@ -1,34 +1,98 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 
 import curses, locale, select, signal, socket, struct, sys, time
 
-SALT = (33, '.')
-CRACKER = (34, '#')
-TOBASCO = (35, 'i')
-SNACK_BREAD = (36, 'B')
-OMLET = (37, '_')
-WATER = (38, 'U')
+locale.setlocale(locale.LC_ALL, '')
 
+NAME = 0
+SYMBOL = 1
+COLOR = 2
+
+the_foods = {
+        33: ('SALT', '.', 231),
+        34: ('CRACKER', '#', 227),
+        35: ('TOBASCO', 'i', 124),
+        36: ('SNACK_BREAD', 'B', 180),
+        37: ('OMLET', '_', 185),
+        38: ('WATER', 'U', 123)
+        }
+
+the_sneks = {
+        0: ('Bob', 'O@', 9),
+        1: ('Alice', 'O@', 9),
+        2: ('Fred', 'O@', 10),
+        3: ('Karen', 'O@', 11),
+        4: ('Chris', 'O@', 12),
+        5: ('Mary', 'O@', 13),
+        6: ('Pete', 'O@', 14),
+        7: ('Janice', 'O@', 15),
+        8: ('Snuffy', 'O&', 238),
+        9: ('Jody', 'O&', 160),
+        10: ('Leo', 'O&', 155),
+        11: ('Tricia', 'O&', 220),
+        12: ('Scott', 'O&', 21),
+        13: ('Matt', 'O&', 129),
+        14: ('Morne', 'O&', 159),
+        15: ('Tammi', 'O&', 252),
+        16: ('Dave', 'O&', 56)
+        }
+
+WHITEONGRAY = 128
+
+helpmsg = '''
+Welcome to Snek 0.001 Alpha Early Access
+==========================================================
+Snek is a multiplayer highly competitive snek on
+snek action game.  Only the most highly motivated,
+battle focused, and hydrated snek will survive.
+
+It would behoove you to read the following instructions:
+==========================================================
+1. Use the arrow keys to maneuver your snek around
+the battle space.
+
+2. Maintain situational awareness at all times,
+collisions with other sneks or walls will reduce your
+combat power to 0.  You will fail.
+
+3. Consume food to multiply your combat power.  Make
+sure to do PT.
+
+4. DRINK WATER.
+
+5. Press 'q' to pay respects to your inner weakness.
+
+Food:
+=========================================================
+. = MRE Salt.  Consume lightly, will reduce your
+hydration level.
+# = MRE Cracker.  Try to eat it all without drinking.
+i = MRE Tobasco.  Will make you immune to poison for
+a short time.
+B = MRE Snack Bread.  Yum.
+_ = MRE Omlet.  Only the finest for your snek.
+U = MRE Water.  Drink it.
+$ = MRE Jalepeno Cheese Spread.  Basically money.
+
+~~~ Press SPACE to begin game! ~~~~
+'''
 
 class snekception(Exception): pass
 
 class renderer:
     screen = None
     game_window = None
-    message_window = None
-    sidebar_window = None
+    messagebar = None
+    sidebar = None
+    helpbox = None
 
     def init_curses(self):
 
-        locale.setlocale(locale.LC_ALL, '')
         self.screen = curses.initscr()
-
-
-
         height, width = self.screen.getmaxyx()
 
-#        if height < 56 or width < 96:
-#            raise snekception('Sorry, Snek requires a 96x56 console window.  Go big or go home.\n')
+        if height < 56 or width < 96:
+            raise snekception('Sorry, Snek requires a 96x56 console window.  Go big or go home.\n')
 
         curses.cbreak()
         curses.noecho()
@@ -45,40 +109,27 @@ class renderer:
         curses.use_default_colors()
 
         # init snek colors
-        curses.init_pair(1, 9, curses.COLOR_BLACK)
-        curses.init_pair(2, 10, curses.COLOR_BLACK)
-        curses.init_pair(3, 11, curses.COLOR_BLACK)
-        curses.init_pair(4, 12, curses.COLOR_BLACK)
-        curses.init_pair(5, 13, curses.COLOR_BLACK)
-        curses.init_pair(6, 14, curses.COLOR_BLACK)
-        curses.init_pair(7, 15, curses.COLOR_BLACK)
-        curses.init_pair(8, 238, curses.COLOR_BLACK)
-        curses.init_pair(9, 160, curses.COLOR_BLACK)
-        curses.init_pair(10, 155, curses.COLOR_BLACK)
-        curses.init_pair(11, 220, curses.COLOR_BLACK)
-        curses.init_pair(12, 21, curses.COLOR_BLACK)
-        curses.init_pair(13, 129, curses.COLOR_BLACK)
-        curses.init_pair(14, 159, curses.COLOR_BLACK)
-        curses.init_pair(15, 252, curses.COLOR_BLACK)
-        curses.init_pair(16, 243, curses.COLOR_BLACK)
+        for i in the_sneks.keys():
+            curses.init_pair(i, the_sneks[i][COLOR], curses.COLOR_BLACK)
 
         # init food colors
-        curses.init_pair(33, 231, curses.COLOR_BLACK)
-        curses.init_pair(34, 227, curses.COLOR_BLACK)
-        curses.init_pair(35, 124, curses.COLOR_BLACK)
-        curses.init_pair(36, 180, curses.COLOR_BLACK)
-        curses.init_pair(37, 185, curses.COLOR_BLACK)
-        curses.init_pair(38, 123, curses.COLOR_BLACK)
+        for i in the_foods.keys():
+            curses.init_pair(i, the_foods[i][COLOR], curses.COLOR_BLACK)
+
+        # init other colors
+        curses.init_pair(WHITEONGRAY, curses.COLOR_WHITE, 234)
 
         # init game window
         self.game_window = curses.newwin(42,83,0,0)
         self.game_window.scrollok(False)
         self.sidebar = curses.newwin(42,43,0,83)
         self.messagebar = curses.newwin(22,125,42,0)
+        self.helpbox = curses.newwin(41,62,5,30)
 
     def shutdown(self):
         curses.endwin()
 
+# recv n characters from the socket
 def recv_n(sock, recv_len):
     try:
         buf = b''
@@ -116,96 +167,111 @@ class game:
     messages = []
     messages.insert(0, 'Welcome to Snek!')
     dirty = True
-    board = [[ord(' ') for x in range(0,80)] for y in range(0,40)]
+    board = [[0 for x in range(0,80)] for y in range(0,40)]
+    show_help = True
+
+    def draw_help(self):
+        if self.show_help:
+            self.my_renderer.helpbox.erase()
+            helplines = helpmsg.split('\n')
+            for y in range(0,40):
+                if y == 0 or y == 39:
+                    self.my_renderer.helpbox.addstr(y,0,'+' + '-' * 60 + '+', curses.color_pair(WHITEONGRAY))
+                elif y == 1 or y == 38:
+                    self.my_renderer.helpbox.addstr(y,0,'++' + '-' * 58 + '++', curses.color_pair(WHITEONGRAY))
+                elif y - 2 < len(helplines):
+                    self.my_renderer.helpbox.addstr(y,0,'||' + helplines[y-2].center(58) + '||', curses.color_pair(WHITEONGRAY))
+                else:
+                    self.my_renderer.helpbox.addstr(y,0,'||' + ''.ljust(58) + '||', curses.color_pair(WHITEONGRAY))
+            self.my_renderer.helpbox.refresh()
 
     def draw_game(self):
         self.draw_board()
         self.draw_sidebar()
         self.draw_messagebar()
+        self.draw_help()
 
     def draw_board(self):
         if self.dirty:
             self.my_renderer.game_window.erase()
-            self.my_renderer.game_window.addstr(0,0,u'\u2500'.encode('UTF-8'))
+            self.my_renderer.game_window.addstr(0,0,'+' + '-' * 80 + '+')
             y = 1
             for y_line in self.board:
                 x = 1
-                self.my_renderer.game_window.addch(y,0,'*')
+                self.my_renderer.game_window.addch(y,0,'|')
                 for x_elem in y_line:
                     # draw sneks
-                    sys.stderr.write(repr(str(x_elem)) + repr(type(x_elem)))
-                    if x_elem > 0 and x_elem < 17:
-                        self.my_renderer.game_window.attron(curses.color_pair(x_elem))
-                        self.my_renderer.game_window.attron(curses.A_BOLD)
-                        self.my_renderer.game_window.addch(y, x, '@')
-                        self.my_renderer.game_window.attroff(curses.color_pair(x_elem))
-                        self.my_renderer.game_window.attroff(curses.A_BOLD)
+                    if x_elem > 0 and x_elem < 33:
+                        snek_id = (x_elem if x_elem % 2 == 0 else x_elem + 1) // 2
+                        self.my_renderer.game_window.addstr(y, x, the_sneks[snek_id][SYMBOL][x_elem % 2], curses.color_pair(snek_id))
                     # draw foodz
                     elif x_elem > 32 and x_elem < 64:
-                        self.my_renderer.game_window.attron(curses.color_pair(2))
-                        self.my_renderer.game_window.attron(curses.A_BOLD)
-                        self.my_renderer.game_window.addch(y, x, '#')
-                        self.my_renderer.game_window.attroff(curses.color_pair(2))
-                        self.my_renderer.game_window.attroff(curses.A_BOLD)
+                        self.my_renderer.game_window.addstr(y, x, the_foods[x_elem][SYMBOL], curses.color_pair(x_elem))
                     x += 1
-                self.my_renderer.game_window.addch(y,81,'*')
+                self.my_renderer.game_window.addch(y,81,'|')
                 y += 1
-            self.my_renderer.game_window.addnstr(41,0,'*'*82, 82)
+            self.my_renderer.game_window.addnstr(41,0,'+' + '-' * 80 + '+', 82)
             self.my_renderer.game_window.refresh()
             self.dirty = False
 
     def draw_sidebar(self):
         self.my_renderer.sidebar.erase()
         for y in range(0, 42):
+            # draw header and footer
             if y == 0 or y == 41:
-                self.my_renderer.sidebar.addstr(y,0,'*'*42)
+                self.my_renderer.sidebar.addstr(y,0,'+' + '-' * 40 + '+')
+            # draw body of side bar
             else:
                 if y > 0 and y < 17:
-                    self.my_renderer.sidebar.attron(curses.color_pair(y))
-                    self.my_renderer.sidebar.attron(curses.A_BOLD)
-                    self.my_renderer.sidebar.addstr(y,0,'* ' + ('Snek ' + str(y) + ': !!!!!!!! ' + str(self.sneks[y-1].score)).ljust(39) + '*')
-                    self.my_renderer.sidebar.attroff(curses.color_pair(y))
-                    self.my_renderer.sidebar.attron(curses.A_BOLD)
+                    self.my_renderer.sidebar.addstr(y,0,'| ')
+                    self.my_renderer.sidebar.addstr(the_sneks[y][NAME].ljust(13) + '!!!!!!!!'.ljust(13) + str('{:010}'.format(self.sneks[y-1].score)).rjust(12), curses.color_pair(y))
+                    self.my_renderer.sidebar.addstr(' | ')
                 else:
-                    self.my_renderer.sidebar.addstr(y,0,'*' + (' ' * 40) + '*')
+                    self.my_renderer.sidebar.addstr(y,0,'|' + (' ' * 40) + '|')
         self.my_renderer.sidebar.refresh()
 
     def draw_messagebar(self):
         self.my_renderer.messagebar.erase()
         for y in range(0,13):
+            # draw header and footer
             if y == 0 or y == 12:
-                self.my_renderer.messagebar.addstr(y,0,'*'*125)
+                self.my_renderer.messagebar.addstr(y,0,'+' + '-' * 123 + '+')
+            # draw body of message body
             else:
                 if len(self.messages) > y - 1 and self.messages[y-1]:
-                    self.my_renderer.messagebar.addstr(y,0,'*' + (' ' + self.messages[y-1]).ljust(123) + '*')
+                    self.my_renderer.messagebar.addstr(y,0,'|' + (' ' + self.messages[y-1]).ljust(123) + '|')
                 else:
-                    self.my_renderer.messagebar.addstr(y,0,'*' + ''.ljust(123) + '*')
+                    self.my_renderer.messagebar.addstr(y,0,'|' + ''.ljust(123) + '|')
         self.my_renderer.messagebar.refresh()
 
     def process_msg(self, msg):
+        msg_type = msg[0]
         num_sneks = msg[0]
-        sys.stderr.write('Num_sneks: ' + str(num_sneks) + '\r\n')
         sneks = msg[1:1 + num_sneks * 5]
         board_changes = msg[1 + num_sneks * 5:]
-        for i in range(0, num_sneks):
-            # process sneks
+        # process sneks
+        for snek in [sneks[i:i+5] for i in range(0, len(sneks), 5)]:
+            snek_id = snek[0]
+            self.sneks[snek_id].score = struct.unpack('!h', snek[1:3])[0]
+            self.sneks[snek_id].health = struct.unpack('!h', snek[3:5])[0]
             pass
+        # process board updates
         for update in [board_changes[i:i+3] for i in range(0, len(board_changes), 3)]:
-            sys.stderr.write('Board_update: ' + str(update[0]) + ' ' + str(update[1]) + ' ' + str(update[2]) + '\r\n')
+#            sys.stderr.write('Board_update: ' + str(update[0]) + ' ' + str(update[1]) + ' ' + str(update[2]) + '\r\n')
             self.board[update[1]][update[0]] = int(update[2])
             self.dirty = True
 
     def turn_up(self):
-        self.sock.send(chr(self.my_snek.snek_id) + '\x01')
+        self.sock.send(bytes([self.my_snek.snek_id]) + b'\x01')
 
     def turn_right(self):
-        self.sock.send(chr(self.my_snek.snek_id) + '\x02')
+        self.sock.send(bytes([self.my_snek.snek_id]) + b'\x02')
 
     def turn_down(self):
-        self.sock.send(chr(self.my_snek.snek_id) + '\x03')
+        self.sock.send(bytes([self.my_snek.snek_id]) + b'\x03')
 
     def turn_left(self):
-        self.sock.send(chr(self.my_snek.snek_id) + '\x04')
+        self.sock.send(bytes([self.my_snek.snek_id]) + b'\x04')
 
 def sig_handler(s, f):
     print('\r\nQuitting! Thanks for playing snek.')
@@ -215,6 +281,9 @@ def sig_handler(s, f):
 def main():
     signal.signal(signal.SIGINT, sig_handler)
     connected = False
+    joined = False
+    join_sent = False
+    time.sleep(2)
 
     # init the game
     my_game = game()
@@ -236,7 +305,7 @@ def main():
 
     try:
         my_game.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        my_game.sock.connect(('localhost', 55553))
+        my_game.sock.connect(('localhost', 55555))
         my_game.sock.setblocking(0)
     except:
         my_game.my_renderer.shutdown()
@@ -246,31 +315,6 @@ def main():
     # connected to the snek server
     print('Connected!\r')
     connected = True
-
-    # join the game, maybe
-    print('Joining game...\r')
-    my_game.sock.send(b'\x00\x00')
-
-    # check for response to join, timeout after 60s
-    r, w, e = select.select([my_game.sock],[],[],60)
-    if my_game.sock in r:
-        # got a response, get our id
-        rx = my_game.sock.recv(2)
-        sys.stderr.write(repr(rx))
-        my_game.my_snek.snek_id = rx[0]
-        my_game.messages.insert(0, 'My snek is: ' + str(my_game.my_snek.snek_id))
-        sys.stderr.write('Got this snek id: ' + str(my_game.my_snek.snek_id) + '\r\n')
-
-        # server told us it was full of sneks
-        if my_game.my_snek.snek_id == 255:
-            my_game.my_renderer.shutdown()
-            print('Server full of sneks.')
-            sys.exit(1)
-    else:
-        # timed out waiting for a snek id
-        my_game.my_renderer.shutdown()
-        print('Error! Joining server timed out...')
-        sys.exit(1)
 
     # main loop
     key = ''
@@ -288,22 +332,46 @@ def main():
                 my_game.turn_up()
             elif key == curses.KEY_DOWN:
                 my_game.turn_down()
+            elif key == ord('h'):
+                my_game.show_help = not my_game.show_help
+                my_game.dirty = True
+            elif key == ord(' '):
+                my_game.show_help = False
+                my_game.dirty = True
+                if not join_sent:
+                    my_game.sock.send(b'\x00\x00')
+                    join_sent = True
             elif key == ord('q'):
                 break
 
             # process socket io
             r, w, e = select.select([my_game.sock], [], [], 0)
             if my_game.sock in r:
-                msg_len = struct.unpack('!i', my_game.sock.recv(4))[0]
-                sys.stderr.write('Msg_len: ' + str(msg_len) + '.\r\n')
-                msg = recv_n(my_game.sock, msg_len)
-                my_game.process_msg(msg)
-            
+                # joined game, process messages normally
+                if joined:
+                    msg_len = struct.unpack('!i', my_game.sock.recv(4))[0]
+                    msg = recv_n(my_game.sock, msg_len)
+                    my_game.process_msg(msg)
+
+                # join sent, but no response yet, wait for our snek id
+                elif join_sent:
+                    # got a response, get our id
+                    rx = my_game.sock.recv(2)
+                    my_game.my_snek.snek_id = rx[0]
+                    my_game.messages.insert(0, 'My snek is: ' + str(my_game.my_snek.snek_id))
+                    joined = True
+
+                    # server told us it was full of sneks
+                    if my_game.my_snek.snek_id == 255:
+                        my_game.my_renderer.shutdown()
+                        print('Server full of sneks.')
+                        sys.exit(1)
+
             # draw the game
             my_game.draw_game()
 
             # don't busy wait... despite what maixner says about you, sleep
-            time.sleep(0.05)
+            time.sleep(0.10)
 
         except Exception as e:
             sys.stderr.write(str(e))

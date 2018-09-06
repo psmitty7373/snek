@@ -17,7 +17,7 @@ def get_fake_board():
     for r in range(0, random.randint(1,50)):
         x = random.randint(0,79)
         y = random.randint(0,39)
-        c = random.randint(1,16)
+        c = random.randint(1,32)
         board += chr(x) + chr(y) + chr(c)
     return board
 
