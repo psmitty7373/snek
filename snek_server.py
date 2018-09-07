@@ -1,66 +1,65 @@
 #!/usr/bin/env python3
 
 import asyncio
-import json
 import argparse
-from datetime import datetime
-import struct 
-import random
+from random import randint
 from copy import deepcopy
+from numpy.random import choice
 
-CLIENT_MSG_LEN = 2
+from snek_pkts import *
+
 SNEK_SERVER = None
-
-# Message types
-MSG_TYPE_JOIN   = 0
-MSG_TYPE_BOARD  = 1
-MSG_TYPE_UPDATE = 2
-MSG_TYPE_INFO   = 3
-MSG_TYPE_TXT    = 4
-
-JOIN_REJECT = 255
-
-INFO_TYPE_JOIN = 0
-INFO_TYPE_KILL = 1
 
 # Directions
 NORTH = 1
-EAST = 2
+EAST  = 2
 SOUTH = 3
-WEST = 4
+WEST  = 4
 
 # Square types
-FOOD  = 33
-BLANK = 0
+SQ_BLANK       = 0
+SQ_SALT        = 33
+SQ_CRACKER     = 34
+SQ_TABASCO     = 35
+SQ_SNACK_BREAD = 36
+SQ_OMLET       = 37
+SQ_WATER       = 38
 
+FOODS = [SQ_SALT, SQ_CRACKER, SQ_TABASCO, SQ_SNACK_BREAD, SQ_OMLET, SQ_WATER]
+FOOD_WEIGHTS = [0.5, 0.15, 0.05, 0.15, 0.05, 0.1]
+
+# Limits
 STARTING_MIN_FOOD = 4
-FOOD_MULTIPLIER = 2
-MAX_SNEKS = 16
+FOOD_MULTIPLIER   = 2
+MAX_SNEKS         = 16
+MAX_X             = 80
+MAX_Y             = 40
+SPAWN_FROM_EDGE   = 15
 
 # Causes of death
 DISCONNECT = 0
 OTHER      = 1
 
 # Game parameters
-TICKS_PER_SECOND = 10
+TICKS_PER_SECOND = 7
 
 class Snek():
     def __init__(self, snek_id, board, transport):
         self.snek_id = snek_id
         self.head_value = snek_id*2+1
         self.body_value = snek_id*2+2
-        direction = random.randint(1, 4)
+        direction = randint(1, 4)
         self.direction = direction
 
         # Cache the direction from the begining of the move to ignore turning back on self
         self.last_direction = direction
 
         # Don't spawn on top of things
-        x = random.randint(15, 65)
-        y = random.randint(15, 25)
+        x = randint(SPAWN_FROM_EDGE, MAX_X - SPAWN_FROM_EDGE)
+        y = randint(SPAWN_FROM_EDGE, MAX_Y - SPAWN_FROM_EDGE)
         while 0 != board[y][x]:
-            x = random.randint(15, 65)
-            y = random.randint(15, 25)
+            x = randint(SPAWN_FROM_EDGE, MAX_X - SPAWN_FROM_EDGE)
+            y = randint(SPAWN_FROM_EDGE, MAX_Y - SPAWN_FROM_EDNGE)
 
         # [block type (head, body), x, y, direction]
         self.blocks = [(self.head_value, x, y, direction)]
@@ -115,7 +114,7 @@ class Snek():
         new_head = (self.head_value, new_x, new_y, self.direction)
 
         tail = self.blocks[-2]
-        new_null_tail = (BLANK, tail[1], tail[2], tail[3])
+        new_null_tail = (SQ_BLANK, tail[1], tail[2], tail[3])
 
         if 2 == len(old_blocks):
             self.blocks = [new_head] + [new_null_tail]
@@ -126,7 +125,7 @@ class Snek():
         self.last_direction = self.direction
 
         # Return the changes
-        return [block for block in self.blocks if block not in set(old_blocks) and BLANK != block[0]] # Say that five times fast.
+        return [block for block in self.blocks if block not in set(old_blocks) and SQ_BLANK != block[0]] # Say that five times fast.
 
     def change_direction(self, direction):
         # Ignore turning back on self
@@ -139,7 +138,7 @@ class Snek():
     def eat(self):
         self.score += 1
         terminal_block = self.blocks[-1]
-        if BLANK != terminal_block[0]:
+        if SQ_BLANK != terminal_block[0]:
             self._append_null_tail()
             terminal_block = self.blocks[-1]
 
@@ -155,11 +154,10 @@ class Snek():
     def _append_null_tail(self):
         terminal_block = self.blocks[-1]
         # Null block already exists
-        if BLANK == terminal_block[0]:
+        if SQ_BLANK == terminal_block[0]:
             return
 
         # Position null block based on direction of terminal block
-        
         direction = terminal_block[3]
         x = terminal_block[1]
         y = terminal_block[2]
@@ -172,12 +170,10 @@ class Snek():
         elif WEST == direction:
             x += 1
 
-        self.blocks.append((BLANK, x, y, direction))
- 
+        self.blocks.append((SQ_BLANK, x, y, direction))
 
 class SnekProtocol(asyncio.Protocol):
-    def __init__(self, connections, sneks, available_snek_ids, food_count, board):
-        self.connections = connections
+    def __init__(self, sneks, available_snek_ids, food_count, board):
         self.sneks = sneks
         self.available_snek_ids = available_snek_ids
         self.food_count = food_count
@@ -227,20 +223,20 @@ class SnekProtocol(asyncio.Protocol):
                     self.sneks[assigned_snek_id] = new_snek
 
                     # Send client its assigned snek id
-                    msg = self._msg_join_accept(assigned_snek_id)
+                    msg = msg_join_accept(assigned_snek_id)
                     self.transport.write(msg)
 
                     # Send whole board one time
-                    msg = self._msg_board()
+                    msg = msg_board(self.board, self.sneks.values())
                     self.transport.write(msg)
-                    
-                    # Add this connection to the list of connections
-                    # so that is starts receiving board updates
-                    self.connections += [self.transport]
+
+                    # Announce join to all players
+                    msg = msg_info(INFO_TYPE_JOIN, assigned_snek_id)
+                    SNEK_SERVER.broadcast(msg)
 
                 # Server is full of sneks. Close failed request.
                 else:
-                    msg = self._msg_join_reject()
+                    msg = msg_join_reject()
                     self.transport.write(msg)
                     self.transport.close()
 
@@ -252,35 +248,9 @@ class SnekProtocol(asyncio.Protocol):
                 # Handle directional commands.
                 self.snek.change_direction(cmd)
 
-    def _msg_join_accept(self, snek_id):
-        return bytes([MSG_TYPE_JOIN, snek_id])
-
-    def _msg_join_reject(self):
-        return bytes([MSG_TYPE_JOIN, JOIN_REJECT])
-
-    # Snek data goes in board messages and update messages
-    def _msg_field_snek_data(self):
-        msg = bytes([len(self.sneks.keys())])
-        for snek in self.sneks.values():
-            msg += bytes([snek.snek_id])
-            msg += snek.score.to_bytes(2, byteorder='big')
-            msg += b'\x00\x00'
-        return msg
-
-    def _msg_board(self):
-        msg = self._msg_field_snek_data()
-        for y in range(len(self.board)):
-            for x in range(len(self.board[0])):
-                msg += bytes([self.board[y][x]])
-
-        msg = bytes([MSG_TYPE_BOARD]) + len(msg).to_bytes(4, byteorder='big') + msg 
-        return msg
-
-
 # The SnekServer has the connections, the sneks, and runs the game.
 class SnekServer():
-    def __init__(self, connections, sneks, available_snek_ids, food_count, board):
-        self.connections = connections
+    def __init__(self, sneks, available_snek_ids, food_count, board):
         self.sneks = sneks
         self.available_snek_ids = available_snek_ids
         self.food_count = food_count
@@ -305,7 +275,7 @@ class SnekServer():
                 new_y = diff[2]
 
                 # Border
-                if new_x < 0 or new_x >= 80 or new_y < 0 or new_y >= 40:
+                if new_x < 0 or new_x >= MAX_X or new_y < 0 or new_y >= MAX_Y:
                     sneks_to_kill.append(self.sneks[snek_id])
                     continue
 
@@ -315,7 +285,7 @@ class SnekServer():
                     conflicts.append((self.board[new_y][new_x], new_x, new_y, 0))
 
                 # The only conflict is a blank square. Do nothing exciting.
-                if 1 == len(conflicts) and BLANK == conflicts[0][0]:
+                if 1 == len(conflicts) and SQ_BLANK == conflicts[0][0]:
                     continue
 
                 for conflict in conflicts:
@@ -346,25 +316,24 @@ class SnekServer():
                 y = block[2]
                 self.board[y][x] = block[0]
 
-    def _broadcast(self, msg):
-        for connection in self.connections:
-            connection.write(msg)
+    def broadcast(self, msg):
+        for snek in self.sneks.values():
+            snek.transport.write(msg)
 
     def kill_snek(self, snek, cause_of_death):
         snek_id = snek.snek_id
         for block in snek.blocks:
-            if (BLANK != block[0] and DISCONNECT == cause_of_death) or (snek.head_value != block[0] and DISCONNECT != cause_of_death):
+            if (SQ_BLANK != block[0] and DISCONNECT == cause_of_death) or (snek.head_value != block[0] and DISCONNECT != cause_of_death):
                 x = block[1]
                 y = block[2]
-                if random.randint(0, 1):
-                    self.board[y][x] = FOOD
+                if randint(0, 1):
+                    self.board[y][x] = SQ_SALT
                     self.food_count += 1
                 else:
-                    self.board[y][x] = BLANK
-        msg = self._msg_info(INFO_TYPE_KILL, snek.snek_id)
-        self._broadcast(msg)
+                    self.board[y][x] = SQ_BLANK
+        msg = msg_info(INFO_TYPE_KILL, snek.snek_id)
+        self.broadcast(msg)
         self.available_snek_ids.insert(0, snek.snek_id)
-        self.connections.remove(snek.transport)
         snek.die()
         self.sneks.pop(snek.snek_id)
 
@@ -375,56 +344,32 @@ class SnekServer():
         self.food_count -= 1
 
     def _spawn_food(self):
-        MIN_FOOD = max(len(self.sneks.keys()) * FOOD_MULTIPLIER, STARTING_MIN_FOOD)
-        while MIN_FOOD > self.food_count:
-            x = random.randint(0, 79)
-            y = random.randint(0, 39)
-            if BLANK == self.board[y][x]:
-                self.board[y][x] = FOOD
+        min_food = max(len(self.sneks.keys()) * FOOD_MULTIPLIER, STARTING_MIN_FOOD)
+        while min_food > self.food_count:
+            food_type = choice(FOODS, p=FOOD_WEIGHTS)
+            x = randint(0, MAX_X - 1)
+            y = randint(0, MAX_Y - 1)
+            if SQ_BLANK == self.board[y][x]:
+                self.board[y][x] = food_type
                 self.food_count += 1
 
     # This will advance the game one "tick" and tell the clients about it.
-    def _update(self):
+    def _tick(self):
         self._cache_board()
         self._slither_the_sneks()
-        msg = self._msg_update()
-        self._broadcast(msg)
+        msg = msg_update(self.board, self.last_board, self.sneks.values())
+        self.broadcast(msg)
 
-    # Snek data goes in board messages and update messages
-    def _msg_field_snek_data(self):
-        msg = bytes([len(self.sneks.keys())])
-        for snek in self.sneks.values():
-            msg += bytes([snek.snek_id])
-            msg += snek.score.to_bytes(2, byteorder='big')
-            msg += b'\x00\x00'
-        return msg
-
-    def _msg_update(self):
-        msg = self._msg_field_snek_data()
-        for y in range(len(self.board)):
-            for x in range(len(self.board[0])):
-                new_square = self.board[y][x]
-                old_square = self.last_board[y][x]
-                if old_square != new_square:
-                    msg += bytes([x, y, new_square])
-
-        msg = bytes([MSG_TYPE_UPDATE]) + len(msg).to_bytes(4, byteorder='big') + msg 
-        return msg
-    
     # Caching the board from the last game tick enables sending 
     # board updates to clients rather than the entire board.
     def _cache_board(self):
         self.last_board = deepcopy(self.board)
 
-    def _msg_info(self, info_type, snek_id):
-       msg = bytes([MSG_TYPE_INFO, info_type, snek_id])
-       return msg
-
 @asyncio.coroutine
 def update_periodically():
     while True:
         yield from asyncio.sleep(1/TICKS_PER_SECOND)
-        SNEK_SERVER._update()
+        SNEK_SERVER._tick()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Server settings")
@@ -433,17 +378,16 @@ if __name__ == "__main__":
     args = vars(parser.parse_args())
 
     # Initialize the server.
-    connections = list()
     sneks = dict()
     available_snek_ids = [i for i in range(MAX_SNEKS-1, -1, -1)]
     food_count = 0
-    board = [[0 for i in range(80)] for j in range(40)]
+    board = [[0 for i in range(MAX_X)] for j in range(MAX_Y)]
 
-    SNEK_SERVER = SnekServer(connections, sneks, available_snek_ids, food_count, board)
+    SNEK_SERVER = SnekServer(sneks, available_snek_ids, food_count, board)
 
     # Run the server.
     loop = asyncio.get_event_loop()
-    coro = loop.create_server(lambda: SnekProtocol(connections, sneks, available_snek_ids, food_count, board), args["addr"], args["port"])
+    coro = loop.create_server(lambda: SnekProtocol(sneks, available_snek_ids, food_count, board), args["addr"], args["port"])
     server = loop.run_until_complete(coro)
 
     print('Serving on {}:{}'.format(*server.sockets[0].getsockname()))
