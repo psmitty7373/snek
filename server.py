@@ -186,16 +186,16 @@ class SnekProtocol(asyncio.Protocol):
         self.snek = None
 
     def connection_made(self, transport):
-        self.peername = transport.get_extra_info('sockname')
+        self.peername = transport.get_extra_info('peername')
+        print('{}:{} connected.'.format(*self.peername))
         self.transport = transport
         
     def connection_lost(self, exc):
         if exc:
             print(exc)
-        err = "{}:{} disconnected".format(*self.peername)
         if self.snek and self.snek.blocks:
             SNEK_SERVER.kill_snek(self.snek, DISCONNECT)
-        print(err)
+        print("{}:{} disconnected.".format(*self.peername))
 
     # Got message from client.
     def data_received(self, data):
