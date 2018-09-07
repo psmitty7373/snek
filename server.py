@@ -34,14 +34,18 @@ FOOD  = 33
 BLANK = 0
 
 STARTING_MIN_FOOD = 4
+FOOD_MULTIPLIER = 2
 MAX_SNEKS = 16
 
 # Causes of death
 DISCONNECT = 0
 OTHER      = 1
 
+# Game parameters
+TICKS_PER_SECOND = 10
+
 class Snek():
-    def __init__(self, snek_id, board):
+    def __init__(self, snek_id, board, transport):
         self.snek_id = snek_id
         self.head_value = snek_id*2+1
         self.body_value = snek_id*2+2
@@ -67,6 +71,7 @@ class Snek():
         self.salt = 50
         self.tabasco = False
         self.poisoned = False
+        self.transport = transport
 
     def poison(self):
         self.poisoned = True
@@ -185,7 +190,6 @@ class SnekProtocol(asyncio.Protocol):
         self.transport = transport
         
     def connection_lost(self, exc):
-        self.connections.remove(self.transport)
         if exc:
             print(exc)
         err = "{}:{} disconnected".format(*self.peername)
@@ -193,31 +197,54 @@ class SnekProtocol(asyncio.Protocol):
             SNEK_SERVER.kill_snek(self.snek, DISCONNECT)
         print(err)
 
+    # Got message from client.
     def data_received(self, data):
         if data and CLIENT_MSG_LEN == len(data):
+
+            # Parse command
             snek_id = int(data[0])
             cmd = int(data[1])
-            if 0 == snek_id and 0 == cmd and not self.snek:
+
+            # Command is a join request.
+            if 0 == snek_id and 0 == cmd:
+
+                # Connection already has a snek but requested a new one. 
+                # That is not legitimate.
+                if self.snek and self.snek.blocks:
+                    print("ignoring bad join request")
+                    return
+
                 # Assign a snek id, iff the server isn't full of sneks.
                 if 0 != len(self.available_snek_ids):
+
                     assigned_snek_id = self.available_snek_ids.pop()
                     print("assigning snek id %i"%assigned_snek_id)
-                    new_snek = Snek(assigned_snek_id, self.board)
-                    self.sneks[assigned_snek_id] = new_snek
+
+                    # Spawn or respawn snek
+                    new_snek = Snek(assigned_snek_id, self.board, self.transport)
                     self.snek = new_snek
+
+                    self.sneks[assigned_snek_id] = new_snek
+
+                    # Send client its assigned snek id
                     msg = self._msg_join_accept(assigned_snek_id)
                     self.transport.write(msg)
+
+                    # Send whole board one time
                     msg = self._msg_board()
                     self.transport.write(msg)
+                    
+                    # Add this connection to the list of connections
+                    # so that is starts receiving board updates
                     self.connections += [self.transport]
 
-                # Close failed requests.
+                # Server is full of sneks. Close failed request.
                 else:
                     msg = self._msg_join_reject()
                     self.transport.write(msg)
                     self.transport.close()
 
-            elif self.snek:
+            elif self.snek and self.snek.blocks:
                 if snek_id != self.snek.snek_id or cmd < 1 or cmd > 4:
                     print("ignoring bad command")
                     return
@@ -337,6 +364,7 @@ class SnekServer():
         msg = self._msg_info(INFO_TYPE_KILL, snek.snek_id)
         self._broadcast(msg)
         self.available_snek_ids.insert(0, snek.snek_id)
+        self.connections.remove(snek.transport)
         snek.die()
         self.sneks.pop(snek.snek_id)
 
@@ -347,7 +375,7 @@ class SnekServer():
         self.food_count -= 1
 
     def _spawn_food(self):
-        MIN_FOOD = max(len(self.sneks.keys()) * 1.5, STARTING_MIN_FOOD)
+        MIN_FOOD = max(len(self.sneks.keys()) * FOOD_MULTIPLIER, STARTING_MIN_FOOD)
         while MIN_FOOD > self.food_count:
             x = random.randint(0, 79)
             y = random.randint(0, 39)
@@ -355,6 +383,7 @@ class SnekServer():
                 self.board[y][x] = FOOD
                 self.food_count += 1
 
+    # This will advance the game one "tick" and tell the clients about it.
     def _update(self):
         self._cache_board()
         self._slither_the_sneks()
@@ -381,7 +410,9 @@ class SnekServer():
 
         msg = bytes([MSG_TYPE_UPDATE]) + len(msg).to_bytes(4, byteorder='big') + msg 
         return msg
-        
+    
+    # Caching the board from the last game tick enables sending 
+    # board updates to clients rather than the entire board.
     def _cache_board(self):
         self.last_board = deepcopy(self.board)
 
@@ -392,7 +423,7 @@ class SnekServer():
 @asyncio.coroutine
 def update_periodically():
     while True:
-        yield from asyncio.sleep(0.2)
+        yield from asyncio.sleep(1/TICKS_PER_SECOND)
         SNEK_SERVER._update()
 
 if __name__ == "__main__":
@@ -401,6 +432,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", default=55555, type=int)
     args = vars(parser.parse_args())
 
+    # Initialize the server.
     connections = list()
     sneks = dict()
     available_snek_ids = [i for i in range(MAX_SNEKS-1, -1, -1)]
@@ -409,6 +441,7 @@ if __name__ == "__main__":
 
     SNEK_SERVER = SnekServer(connections, sneks, available_snek_ids, food_count, board)
 
+    # Run the server.
     loop = asyncio.get_event_loop()
     coro = loop.create_server(lambda: SnekProtocol(connections, sneks, available_snek_ids, food_count, board), args["addr"], args["port"])
     server = loop.run_until_complete(coro)
